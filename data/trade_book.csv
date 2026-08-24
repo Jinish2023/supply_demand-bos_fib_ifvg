@@ -1,0 +1,2 @@
+Ticker,Strategy,Scanned Date,Status,Entry Date,Entry Price,Stop Loss,Target 1,Target 2 (Informational),EMA50 At Entry,Current Price,PnL,PnL %,PnL % (Net of 0.3% Cost),Days Held,Exit Date,Exit Price,Exit Reason,Last Tracked
+TRAVELFOOD.NS,bos_fib_ifvg,2026-08-24,PENDING_ENTRY,,,1251.71,1473.38,1547.27,1317.34,,,,,0,,,,

@@ -75,6 +75,14 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
         (df["High"] - prev_close).abs(),
         (df["Low"] - prev_close).abs(),
     ], axis=1).max(axis=1)
+    # ATR14 deliberately NOT shift(1)'d, unlike AvgRange/VolSMA20 above -
+    # different use case. AvgRange/VolSMA20 are ENTRY-FILTER thresholds
+    # ("is this candle abnormal vs. its own baseline?"), where including
+    # today's candle in its own baseline is self-defeating. ATR14 here is
+    # only used to size the STOP for a trade whose entry has already been
+    # decided - there's no self-contamination risk, and using today's
+    # completed volatility to size the stop is the more sensible choice,
+    # not an oversight (flagged explicitly after code review raised it).
     df["ATR14"] = tr.rolling(14).mean()
 
     df["VolSMA20"] = df["Volume"].rolling(20).mean().shift(1)
@@ -218,8 +226,14 @@ def scan_bos_fib_ifvg(df: pd.DataFrame, ticker: str, rr: float, rr2: float,
 
     i = swing_k * 2
     while i < n - 1:
-        prior_highs = [x for x in swing_high_idx if x < i]
-        prior_lows = [x for x in swing_low_idx if x < i]
+        # CAUSAL FIX (per code review): a swing at x is only "confirmed"
+        # once x+swing_k has occurred - requiring merely x < i lets an
+        # interior BOS reference a swing that, in a strict day-by-day
+        # replay, wasn't actually knowable yet on day i. Require
+        # x + swing_k < i so every swing referenced here was fully
+        # confirmable strictly before the day it's used.
+        prior_highs = [x for x in swing_high_idx if x + swing_k < i]
+        prior_lows = [x for x in swing_low_idx if x + swing_k < i]
         if len(prior_highs) < 1 or len(prior_lows) < 1:
             i += 1
             continue
@@ -254,11 +268,23 @@ def scan_bos_fib_ifvg(df: pd.DataFrame, ticker: str, rr: float, rr2: float,
                 i += 1
                 continue
 
+            # TOUCH FIX (per code review): "POI + FVG confluence" should
+            # mean price actually trades INTO the confluent FVG's own
+            # range, not merely anywhere in the broader OTE zone that
+            # happens to also contain an FVG somewhere else in it. Build
+            # the union of confluent FVG ranges (each already confirmed
+            # to overlap the OTE zone) and require the pullback candle to
+            # genuinely intersect one of them.
+            fvg_ranges = [(f[1], f[2]) for f in confluent_fvgs]  # (gap_bottom, gap_top)
+
             entry_signal = None
             window_end = min(i + 1 + ifvg_lookahead, n)  # strict cap, no overrun
             for j in range(i + 1, window_end):
                 rbar = df.iloc[j]
-                in_zone = rbar["Low"] <= ote_top and rbar["Low"] >= ote_bottom * 0.99
+                touches_fvg = any(rbar["Low"] <= top and rbar["High"] >= bottom
+                                   for bottom, top in fvg_ranges)
+                in_ote_zone = rbar["Low"] <= ote_top and rbar["Low"] >= ote_bottom * 0.99
+                in_zone = touches_fvg and in_ote_zone
                 if in_zone:
                     for c in range(j, min(j + 3, window_end)):
                         conf_bar = df.iloc[c]

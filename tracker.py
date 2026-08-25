@@ -39,6 +39,11 @@ from strategies import add_indicators
 MAX_HOLD_DAYS = 20     # matches the backtest default
 ROUND_TRIP_COST_PCT = 0.3   # percentage points, matches the 0.3% used throughout
 CHUNK_SIZE = 50
+# Tracker only needs enough history for EMA50 to be numerically stable, not
+# the scanner's 120-bar swing/channel/FVG lookback requirement - reusing
+# that threshold here was a bug that could silently drop a ticker from
+# tracking (see download_chunk's docstring in scanner.py for the full story).
+TRACKER_MIN_BARS = 60
 
 
 def fetch_latest_bars(tickers):
@@ -46,7 +51,7 @@ def fetch_latest_bars(tickers):
     today's bar, for the given tickers."""
     result = {}
     for chunk in batched(sorted(set(tickers)), CHUNK_SIZE):
-        data = download_chunk(chunk, period="1y")
+        data = download_chunk(chunk, period="1y", min_bars=TRACKER_MIN_BARS)
         for ticker, df in data.items():
             df = add_indicators(df)
             if df.empty:
@@ -98,35 +103,59 @@ def main():
     for idx in pending_to_fill.index:
         ticker = df.at[idx, "Ticker"]
         bar = bars.get(ticker)
-        if bar is None or bar["bar_date"] != today_str:
-            print(f"[tracker] {ticker}: no fresh bar today, leaving PENDING_ENTRY")
+        if bar is None:
+            print(f"[tracker] {ticker}: NO DATA returned at all this run "
+                  "(see [scanner]-prefixed lines above for why - e.g. Yahoo "
+                  "Finance data lag, or too few clean bars) - leaving PENDING_ENTRY, "
+                  "will retry next run")
+            continue
+        if bar["bar_date"] != today_str:
+            print(f"[tracker] {ticker}: data returned but latest bar is dated "
+                  f"{bar['bar_date']}, not today ({today_str}) - Yahoo Finance "
+                  "likely hasn't posted today's candle for this ticker yet - "
+                  "leaving PENDING_ENTRY, will retry next run")
             continue
 
         entry_price = bar["open"]
         stop = float(df.at[idx, "Stop Loss"])
         target1 = float(df.at[idx, "Target 1"])
+        signal_ref_close = float(df.at[idx, "Signal Reference Close"])
+        entry_gap_pct = (entry_price - signal_ref_close) / signal_ref_close * 100.0
 
         df.at[idx, "Entry Date"] = today_str
         df.at[idx, "Entry Price"] = f"{entry_price:.2f}"
+        df.at[idx, "Entry Gap %"] = f"{entry_gap_pct:+.2f}"
         df.at[idx, "Status"] = "OPEN"
         df.at[idx, "Days Held"] = "0"
         df.at[idx, "Last Tracked"] = now_ts
         filled += 1
 
-        # same-day exit check using today's realized High/Low/Close,
-        # priority: Stop first (conservative tie-break, matches backtest)
-        hit_stop = bar["low"] <= stop
-        hit_target = bar["high"] >= target1
-        hit_ema_break = bar["close"] < bar["ema50"]
+        # GAP-RISK SAFETY CHECK (added after code review): if the open
+        # itself already gapped through the stop, a real stop order would
+        # NOT have filled at the stop price - it fills at whatever price
+        # is available, i.e. the open. Treat this as an immediate,
+        # worse-than-planned loss rather than pretending you got the
+        # stop price. This is separate from an ordinary same-day stop
+        # hit (where price opens fine and later trades down to the stop).
+        gapped_through_stop = bar["open"] <= stop
 
-        exit_price = None
-        exit_reason = None
-        if hit_stop:
-            exit_price, exit_reason = stop, "Stoploss Hit"
-        elif hit_target:
-            exit_price, exit_reason = target1, "Target1 Hit"
-        elif hit_ema_break:
-            exit_price, exit_reason = bar["close"], "EMA50 Breakout"
+        if gapped_through_stop:
+            exit_price, exit_reason = bar["open"], "Stoploss Hit (Gap)"
+        else:
+            # same-day exit check using today's realized High/Low/Close,
+            # priority: Stop first (conservative tie-break, matches backtest)
+            hit_stop = bar["low"] <= stop
+            hit_target = bar["high"] >= target1
+            hit_ema_break = bar["close"] < bar["ema50"]
+
+            exit_price = None
+            exit_reason = None
+            if hit_stop:
+                exit_price, exit_reason = stop, "Stoploss Hit"
+            elif hit_target:
+                exit_price, exit_reason = target1, "Target1 Hit"
+            elif hit_ema_break:
+                exit_price, exit_reason = bar["close"], "EMA50 Breakout"
 
         current_price = exit_price if exit_price is not None else bar["close"]
         pnl, pnl_pct, net_pnl_pct = compute_pnl(entry_price, current_price)
@@ -145,8 +174,14 @@ def main():
     for idx in open_rows.index:
         ticker = df.at[idx, "Ticker"]
         bar = bars.get(ticker)
-        if bar is None or bar["bar_date"] != today_str:
-            print(f"[tracker] {ticker}: no fresh bar today, leaving as-is")
+        if bar is None:
+            print(f"[tracker] {ticker}: NO DATA returned at all this run - "
+                  "leaving position as-is, will retry next run")
+            continue
+        if bar["bar_date"] != today_str:
+            print(f"[tracker] {ticker}: data returned but latest bar is dated "
+                  f"{bar['bar_date']}, not today ({today_str}) - leaving "
+                  "position as-is, will retry next run")
             continue
 
         entry_price = float(df.at[idx, "Entry Price"])

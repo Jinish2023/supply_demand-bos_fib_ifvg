@@ -38,6 +38,8 @@ COLUMNS = [
     "Status",                    # PENDING_ENTRY | OPEN | CLOSED
     "Entry Date",                # ISO date, set once tracker fills the entry
     "Entry Price",
+    "Signal Reference Close",    # confirmation candle's close - what Stop/Target1/Target2 were sized off
+    "Entry Gap %",               # (Entry Price - Signal Reference Close) / Signal Reference Close * 100
     "Stop Loss",
     "Target 1",
     "Target 2 (Informational)",  # NOT a real exit trigger - see README
@@ -53,7 +55,7 @@ COLUMNS = [
     "Last Tracked",              # ISO timestamp
 ]
 
-EXIT_REASONS = ["EMA50 Breakout", "Time Exit", "Stoploss Hit", "Target1 Hit"]
+EXIT_REASONS = ["EMA50 Breakout", "Time Exit", "Stoploss Hit", "Stoploss Hit (Gap)", "Target1 Hit"]
 
 
 def today_ist() -> datetime:

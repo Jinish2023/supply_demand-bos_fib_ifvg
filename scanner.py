@@ -46,9 +46,18 @@ def batched(seq, size):
         yield seq[i:i + size]
 
 
-def download_chunk(tickers, period=LOOKBACK_PERIOD):
+def download_chunk(tickers, period=LOOKBACK_PERIOD, min_bars=MIN_BARS_REQUIRED):
     """Batch-download a chunk of tickers in one yfinance call, returning
-    {ticker: DataFrame}. Falls back to skipping tickers that fail."""
+    {ticker: DataFrame}. min_bars is the minimum row count required to
+    keep a ticker - defaults to MIN_BARS_REQUIRED (120, needed for the
+    SCANNER's swing/channel/FVG lookback context). tracker.py passes a
+    much lower min_bars, since it only needs a handful of recent bars
+    (enough for EMA50 to be stable) to track an ALREADY-confirmed signal -
+    reusing the scanner's 120-bar requirement there was a bug: it could
+    silently drop a ticker from tracking entirely if its fetched window
+    ever came back with fewer than 120 clean rows (a thin trading history,
+    a corporate action, a few NaN days), with no way to tell from the logs
+    that this - rather than a genuine data lag - was the actual cause."""
     out = {}
     try:
         raw = yf.download(tickers, period=period, interval="1d",
@@ -65,12 +74,18 @@ def download_chunk(tickers, period=LOOKBACK_PERIOD):
             else:
                 df = raw[t] if t in raw.columns.get_level_values(0) else None
             if df is None or df.empty:
+                print(f"[scanner] {t}: yfinance returned no data at all this run")
                 continue
             df = df.rename(columns=str.title)
             df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-            if len(df) >= MIN_BARS_REQUIRED:
+            if len(df) >= min_bars:
                 out[t] = df
-        except Exception:
+            else:
+                last_date = df.index[-1].strftime("%Y-%m-%d") if len(df) > 0 else "n/a"
+                print(f"[scanner] {t}: only {len(df)} clean bars returned "
+                      f"(need {min_bars}), latest available date: {last_date}")
+        except Exception as e:
+            print(f"[scanner] {t}: error processing downloaded data ({e})")
             continue
     return out
 

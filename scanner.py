@@ -23,10 +23,19 @@ import yfinance as yf
 
 import market_utils as mu
 import universe as uni
-from strategies import add_indicators, scan_supply_demand, scan_bos_fib_ifvg
+from strategies import add_indicators, scan_supply_demand, scan_bos_fib_ifvg, \
+    ATR_MULT_DEFAULT, VOLUME_MULT_DEFAULT
 
 RR1 = 2.0        # Target 1 reward:risk, matches the backtest default
 RR2 = 3.0        # Target 2 (informational only) reward:risk
+# Hardening config, per your 15-year NSE500 ablation: ATR-stop + volume
+# filter together was the winning combo for BOTH strategies (displacement
+# was tested three times, alone and stacked twice, and hurt both - left
+# off deliberately). These are just the defaults from strategies.py made
+# visible here; override them if you re-run the ablation with different
+# tuning later.
+ATR_MULT = ATR_MULT_DEFAULT
+VOLUME_MULT = VOLUME_MULT_DEFAULT
 LOOKBACK_PERIOD = "2y"   # plenty of context for swing/channel/FVG lookbacks
 CHUNK_SIZE = 50
 MIN_BARS_REQUIRED = 120
@@ -99,10 +108,7 @@ def main():
                 if (ticker, strategy_name) in active_pairs:
                     continue
                 try:
-                    if strategy_name == "supply_demand":
-                        sig = scan_fn(df, ticker, RR1, RR2)
-                    else:
-                        sig = scan_fn(df, ticker, RR1, RR2)
+                    sig = scan_fn(df, ticker, RR1, RR2, atr_mult=ATR_MULT, volume_mult=VOLUME_MULT)
                 except Exception as e:
                     print(f"[scanner] {ticker}/{strategy_name} error: {e}")
                     continue
@@ -120,6 +126,8 @@ def main():
                     "Status": "PENDING_ENTRY",
                     "Entry Date": "",
                     "Entry Price": "",
+                    "Signal Reference Close": f"{sig.confirm_close:.2f}",
+                    "Entry Gap %": "",
                     "Stop Loss": f"{sig.stop:.2f}",
                     "Target 1": f"{sig.target1:.2f}",
                     "Target 2 (Informational)": f"{sig.target2:.2f}",

@@ -95,7 +95,14 @@ def is_fresh_trading_day() -> bool:
 
 def load_trade_book() -> pd.DataFrame:
     if os.path.exists(TRADE_BOOK_PATH):
-        df = pd.read_csv(TRADE_BOOK_PATH, dtype=str)
+        # keep_default_na=False: dtype=str alone does NOT stop pandas from
+        # converting blank fields to NaN on read (NA-detection runs before
+        # the dtype cast) - this schema treats every column as string-typed
+        # where blank means "not yet set", so a blank field must stay ''
+        # after reload, not silently become float NaN. Bug found while
+        # testing the "Current Price populated at scan time" change, but
+        # it was latent everywhere in the trade book before that too.
+        df = pd.read_csv(TRADE_BOOK_PATH, dtype=str, keep_default_na=False)
         for col in COLUMNS:
             if col not in df.columns:
                 df[col] = ""

@@ -106,6 +106,7 @@ def main():
     print(f"[scanner] {len(active_pairs)} ticker/strategy pairs already active - will skip those")
 
     today_str = mu.today_ist_date_str()
+    now_ts = mu.now_ist_ts_str()
     new_rows = []
     processed = 0
     t0 = time.time()
@@ -147,7 +148,8 @@ def main():
                     "Target 1": f"{sig.target1:.2f}",
                     "Target 2 (Informational)": f"{sig.target2:.2f}",
                     "EMA50 At Entry": f"{sig.ema50_at_signal:.2f}",
-                    "Current Price": "",
+                    "Current Price": f"{sig.confirm_close:.2f}",  # informational only - no position yet,
+                                                                    # so PnL/PnL% stay blank until Status=OPEN
                     "PnL": "",
                     "PnL %": "",
                     "PnL % (Net of 0.3% Cost)": "",
@@ -155,7 +157,7 @@ def main():
                     "Exit Date": "",
                     "Exit Price": "",
                     "Exit Reason": "",
-                    "Last Tracked": "",
+                    "Last Tracked": now_ts,
                 })
                 active_pairs.add((ticker, strategy_name))  # avoid double-adding within this same run
 

@@ -33,6 +33,31 @@ jobs:
           git config user.name "trading-bot"
           git config user.email "trading-bot@users.noreply.github.com"
           git add data/trade_book.csv
-          git diff --staged --quiet || git commit -m "Scanner: $(date -u +'%Y-%m-%d %H:%M UTC')"
-          git pull --rebase origin main || true
-          git push
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Scanner: $(date -u +'%Y-%m-%d %H:%M UTC')"
+
+          # Retry with rebase: scanner and tracker both write to the same
+          # file and can run close together, so a push can lose a race.
+          # The old "git pull --rebase || true" swallowed that failure
+          # silently and then pushed anyway - this could drop an update
+          # with no visible error. Retry instead, and fail LOUDLY (exit 1)
+          # if every attempt fails, so a real problem shows up as a failed
+          # Actions run instead of a silently missing commit.
+          success=0
+          for i in 1 2 3 4 5; do
+            git pull --rebase origin main
+            if git push; then
+              success=1
+              break
+            fi
+            echo "Push attempt $i failed (likely racing the other workflow) - retrying in 15s..."
+            sleep 15
+          done
+
+          if [ "$success" -ne 1 ]; then
+            echo "ERROR: failed to push after 5 attempts - this run's update was LOST."
+            exit 1
+          fi

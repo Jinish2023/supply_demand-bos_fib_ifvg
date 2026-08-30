@@ -1,9 +1,16 @@
-name: Tracker (4:15 PM IST)
+name: Tracker (4:15 PM IST + 8:15 PM IST catch-up)
 
 on:
   schedule:
-    # 10:45 UTC = 4:15 PM IST, Mon-Fri.
+    # 10:45 UTC = 4:15 PM IST, Mon-Fri: primary run.
     - cron: "45 10 * * 1-5"
+    # 14:45 UTC = 8:15 PM IST, Mon-Fri: catch-up run, 15 min after the
+    # scanner's own catch-up - same safety-net rationale as scanner.yml.
+    # Safe by construction: entry-fill only ever applies to rows scanned
+    # on a PRIOR day, and OPEN-row updates are idempotent re-marks against
+    # the same closed candle, so a second same-day pass changes nothing
+    # if the first pass already succeeded.
+    - cron: "45 14 * * 1-5"
   workflow_dispatch: {}
 
 permissions:

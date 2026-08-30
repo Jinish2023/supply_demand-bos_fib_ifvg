@@ -102,51 +102,120 @@ def main():
 
     for idx in pending_to_fill.index:
         ticker = df.at[idx, "Ticker"]
-        bar = bars.get(ticker)
-        if bar is None:
-            print(f"[tracker] {ticker}: NO DATA returned at all this run "
-                  "(see [scanner]-prefixed lines above for why - e.g. Yahoo "
-                  "Finance data lag, or too few clean bars) - leaving PENDING_ENTRY, "
-                  "will retry next run")
+        try:
+            bar = bars.get(ticker)
+            if bar is None:
+                print(f"[tracker] {ticker}: NO DATA returned at all this run "
+                      "(see [scanner]-prefixed lines above for why - e.g. Yahoo "
+                      "Finance data lag, or too few clean bars) - leaving PENDING_ENTRY, "
+                      "will retry next run")
+                continue
+            if bar["bar_date"] != today_str:
+                print(f"[tracker] {ticker}: data returned but latest bar is dated "
+                      f"{bar['bar_date']}, not today ({today_str}) - Yahoo Finance "
+                      "likely hasn't posted today's candle for this ticker yet - "
+                      "leaving PENDING_ENTRY, will retry next run")
+                continue
+
+            entry_price = bar["open"]
+            stop = float(df.at[idx, "Stop Loss"])
+            target1 = float(df.at[idx, "Target 1"])
+
+            # ROBUSTNESS FIX: rows written by an older version of scanner.py
+            # (before "Signal Reference Close" existed) have this field
+            # blank. float("") crashes - and since that crash happened
+            # BEFORE save_trade_book() was ever reached, it was silently
+            # killing the ENTIRE run, blocking every other row too, for as
+            # many days as the bad row sat there. Signal Reference Close is
+            # informational only (used for Entry Gap %), so a missing value
+            # should degrade to "gap unknown", never crash the whole job.
+            raw_ref_close = df.at[idx, "Signal Reference Close"]
+            if raw_ref_close not in ("", None) and str(raw_ref_close).strip() != "":
+                signal_ref_close = float(raw_ref_close)
+                entry_gap_pct_str = f"{(entry_price - signal_ref_close) / signal_ref_close * 100.0:+.2f}"
+            else:
+                entry_gap_pct_str = "N/A (legacy row, no reference price recorded)"
+
+            df.at[idx, "Entry Date"] = today_str
+            df.at[idx, "Entry Price"] = f"{entry_price:.2f}"
+            df.at[idx, "Entry Gap %"] = entry_gap_pct_str
+            df.at[idx, "Status"] = "OPEN"
+            df.at[idx, "Days Held"] = "0"
+            df.at[idx, "Last Tracked"] = now_ts
+            filled += 1
+
+            # GAP-RISK SAFETY CHECK (added after code review): if the open
+            # itself already gapped through the stop, a real stop order would
+            # NOT have filled at the stop price - it fills at whatever price
+            # is available, i.e. the open. Treat this as an immediate,
+            # worse-than-planned loss rather than pretending you got the
+            # stop price. This is separate from an ordinary same-day stop
+            # hit (where price opens fine and later trades down to the stop).
+            gapped_through_stop = bar["open"] <= stop
+
+            if gapped_through_stop:
+                exit_price, exit_reason = bar["open"], "Stoploss Hit (Gap)"
+            else:
+                # same-day exit check using today's realized High/Low/Close,
+                # priority: Stop first (conservative tie-break, matches backtest)
+                hit_stop = bar["low"] <= stop
+                hit_target = bar["high"] >= target1
+                hit_ema_break = bar["close"] < bar["ema50"]
+
+                exit_price = None
+                exit_reason = None
+                if hit_stop:
+                    exit_price, exit_reason = stop, "Stoploss Hit"
+                elif hit_target:
+                    exit_price, exit_reason = target1, "Target1 Hit"
+                elif hit_ema_break:
+                    exit_price, exit_reason = bar["close"], "EMA50 Breakout"
+
+            current_price = exit_price if exit_price is not None else bar["close"]
+            pnl, pnl_pct, net_pnl_pct = compute_pnl(entry_price, current_price)
+            df.at[idx, "Current Price"] = f"{current_price:.2f}"
+            df.at[idx, "PnL"] = f"{pnl:.2f}"
+            df.at[idx, "PnL %"] = f"{pnl_pct:.2f}"
+            df.at[idx, "PnL % (Net of 0.3% Cost)"] = f"{net_pnl_pct:.2f}"
+
+            if exit_reason:
+                df.at[idx, "Status"] = "CLOSED"
+                df.at[idx, "Exit Date"] = today_str
+                df.at[idx, "Exit Price"] = f"{exit_price:.2f}"
+                df.at[idx, "Exit Reason"] = exit_reason
+                closed += 1
+        except Exception as e:
+            # FAULT ISOLATION: one malformed/unexpected row must never be
+            # able to kill the whole run and block every other row's
+            # update. Log it clearly and move on - this is exactly the bug
+            # that caused 3 days of silently-failed tracker runs.
+            print(f"[tracker] ERROR processing PENDING_ENTRY row for {ticker}: {e} "
+                  "- skipping this row, continuing with the rest")
             continue
-        if bar["bar_date"] != today_str:
-            print(f"[tracker] {ticker}: data returned but latest bar is dated "
-                  f"{bar['bar_date']}, not today ({today_str}) - Yahoo Finance "
-                  "likely hasn't posted today's candle for this ticker yet - "
-                  "leaving PENDING_ENTRY, will retry next run")
-            continue
 
-        entry_price = bar["open"]
-        stop = float(df.at[idx, "Stop Loss"])
-        target1 = float(df.at[idx, "Target 1"])
-        signal_ref_close = float(df.at[idx, "Signal Reference Close"])
-        entry_gap_pct = (entry_price - signal_ref_close) / signal_ref_close * 100.0
+    for idx in open_rows.index:
+        ticker = df.at[idx, "Ticker"]
+        try:
+            bar = bars.get(ticker)
+            if bar is None:
+                print(f"[tracker] {ticker}: NO DATA returned at all this run - "
+                      "leaving position as-is, will retry next run")
+                continue
+            if bar["bar_date"] != today_str:
+                print(f"[tracker] {ticker}: data returned but latest bar is dated "
+                      f"{bar['bar_date']}, not today ({today_str}) - leaving "
+                      "position as-is, will retry next run")
+                continue
 
-        df.at[idx, "Entry Date"] = today_str
-        df.at[idx, "Entry Price"] = f"{entry_price:.2f}"
-        df.at[idx, "Entry Gap %"] = f"{entry_gap_pct:+.2f}"
-        df.at[idx, "Status"] = "OPEN"
-        df.at[idx, "Days Held"] = "0"
-        df.at[idx, "Last Tracked"] = now_ts
-        filled += 1
+            entry_price = float(df.at[idx, "Entry Price"])
+            stop = float(df.at[idx, "Stop Loss"])
+            target1 = float(df.at[idx, "Target 1"])
+            days_held = int(float(df.at[idx, "Days Held"])) + 1
 
-        # GAP-RISK SAFETY CHECK (added after code review): if the open
-        # itself already gapped through the stop, a real stop order would
-        # NOT have filled at the stop price - it fills at whatever price
-        # is available, i.e. the open. Treat this as an immediate,
-        # worse-than-planned loss rather than pretending you got the
-        # stop price. This is separate from an ordinary same-day stop
-        # hit (where price opens fine and later trades down to the stop).
-        gapped_through_stop = bar["open"] <= stop
-
-        if gapped_through_stop:
-            exit_price, exit_reason = bar["open"], "Stoploss Hit (Gap)"
-        else:
-            # same-day exit check using today's realized High/Low/Close,
-            # priority: Stop first (conservative tie-break, matches backtest)
             hit_stop = bar["low"] <= stop
             hit_target = bar["high"] >= target1
             hit_ema_break = bar["close"] < bar["ema50"]
+            hit_time_exit = days_held >= MAX_HOLD_DAYS
 
             exit_price = None
             exit_reason = None
@@ -156,72 +225,30 @@ def main():
                 exit_price, exit_reason = target1, "Target1 Hit"
             elif hit_ema_break:
                 exit_price, exit_reason = bar["close"], "EMA50 Breakout"
+            elif hit_time_exit:
+                exit_price, exit_reason = bar["close"], "Time Exit"
 
-        current_price = exit_price if exit_price is not None else bar["close"]
-        pnl, pnl_pct, net_pnl_pct = compute_pnl(entry_price, current_price)
-        df.at[idx, "Current Price"] = f"{current_price:.2f}"
-        df.at[idx, "PnL"] = f"{pnl:.2f}"
-        df.at[idx, "PnL %"] = f"{pnl_pct:.2f}"
-        df.at[idx, "PnL % (Net of 0.3% Cost)"] = f"{net_pnl_pct:.2f}"
+            current_price = exit_price if exit_price is not None else bar["close"]
+            pnl, pnl_pct, net_pnl_pct = compute_pnl(entry_price, current_price)
 
-        if exit_reason:
-            df.at[idx, "Status"] = "CLOSED"
-            df.at[idx, "Exit Date"] = today_str
-            df.at[idx, "Exit Price"] = f"{exit_price:.2f}"
-            df.at[idx, "Exit Reason"] = exit_reason
-            closed += 1
+            df.at[idx, "Days Held"] = str(days_held)
+            df.at[idx, "Current Price"] = f"{current_price:.2f}"
+            df.at[idx, "PnL"] = f"{pnl:.2f}"
+            df.at[idx, "PnL %"] = f"{pnl_pct:.2f}"
+            df.at[idx, "PnL % (Net of 0.3% Cost)"] = f"{net_pnl_pct:.2f}"
+            df.at[idx, "Last Tracked"] = now_ts
+            updated += 1
 
-    for idx in open_rows.index:
-        ticker = df.at[idx, "Ticker"]
-        bar = bars.get(ticker)
-        if bar is None:
-            print(f"[tracker] {ticker}: NO DATA returned at all this run - "
-                  "leaving position as-is, will retry next run")
+            if exit_reason:
+                df.at[idx, "Status"] = "CLOSED"
+                df.at[idx, "Exit Date"] = today_str
+                df.at[idx, "Exit Price"] = f"{exit_price:.2f}"
+                df.at[idx, "Exit Reason"] = exit_reason
+                closed += 1
+        except Exception as e:
+            print(f"[tracker] ERROR processing OPEN row for {ticker}: {e} "
+                  "- skipping this row, continuing with the rest")
             continue
-        if bar["bar_date"] != today_str:
-            print(f"[tracker] {ticker}: data returned but latest bar is dated "
-                  f"{bar['bar_date']}, not today ({today_str}) - leaving "
-                  "position as-is, will retry next run")
-            continue
-
-        entry_price = float(df.at[idx, "Entry Price"])
-        stop = float(df.at[idx, "Stop Loss"])
-        target1 = float(df.at[idx, "Target 1"])
-        days_held = int(float(df.at[idx, "Days Held"])) + 1
-
-        hit_stop = bar["low"] <= stop
-        hit_target = bar["high"] >= target1
-        hit_ema_break = bar["close"] < bar["ema50"]
-        hit_time_exit = days_held >= MAX_HOLD_DAYS
-
-        exit_price = None
-        exit_reason = None
-        if hit_stop:
-            exit_price, exit_reason = stop, "Stoploss Hit"
-        elif hit_target:
-            exit_price, exit_reason = target1, "Target1 Hit"
-        elif hit_ema_break:
-            exit_price, exit_reason = bar["close"], "EMA50 Breakout"
-        elif hit_time_exit:
-            exit_price, exit_reason = bar["close"], "Time Exit"
-
-        current_price = exit_price if exit_price is not None else bar["close"]
-        pnl, pnl_pct, net_pnl_pct = compute_pnl(entry_price, current_price)
-
-        df.at[idx, "Days Held"] = str(days_held)
-        df.at[idx, "Current Price"] = f"{current_price:.2f}"
-        df.at[idx, "PnL"] = f"{pnl:.2f}"
-        df.at[idx, "PnL %"] = f"{pnl_pct:.2f}"
-        df.at[idx, "PnL % (Net of 0.3% Cost)"] = f"{net_pnl_pct:.2f}"
-        df.at[idx, "Last Tracked"] = now_ts
-        updated += 1
-
-        if exit_reason:
-            df.at[idx, "Status"] = "CLOSED"
-            df.at[idx, "Exit Date"] = today_str
-            df.at[idx, "Exit Price"] = f"{exit_price:.2f}"
-            df.at[idx, "Exit Reason"] = exit_reason
-            closed += 1
 
     mu.save_trade_book(df)
     print(f"[tracker] Done. Filled {filled} new entr(y/ies), updated {updated} open "

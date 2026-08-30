@@ -27,7 +27,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 DATE_FMT = "%Y-%m-%d"
 TS_FMT = "%Y-%m-%d %H:%M:%S"
 
-REFERENCE_INDEX = "^NSEI"  # Nifty 50 index, used only for the freshness check
+REFERENCE_TICKERS = ["RELIANCE.NS", "TCS.NS", "HDFCBANK.NS"]  # see is_fresh_trading_day()
 
 TRADE_BOOK_PATH = os.path.join(os.path.dirname(__file__), "data", "trade_book.csv")
 
@@ -71,26 +71,48 @@ def now_ist_ts_str() -> str:
 
 
 def is_fresh_trading_day() -> bool:
-    """Auto-detect approach: download the Nifty 50 index's latest daily
-    bar and check whether its date matches today's real IST calendar
-    date. If it doesn't (weekend, NSE holiday, or data lag), today is NOT
-    a fresh trading day and the caller should skip the whole job."""
-    try:
-        df = yf.download(REFERENCE_INDEX, period="5d", interval="1d",
-                          progress=False, auto_adjust=True)
-        if df is None or df.empty:
-            print("[market_utils] Could not fetch reference index - skipping run as a precaution")
-            return False
-        last_bar_date = pd.Timestamp(df.index[-1]).strftime(DATE_FMT)
-        today = today_ist_date_str()
-        if last_bar_date == today:
-            return True
-        print(f"[market_utils] Not a fresh trading day: last available bar is "
-              f"{last_bar_date}, today (IST) is {today}. Skipping.")
-        return False
-    except Exception as e:
-        print(f"[market_utils] Freshness check failed ({e}) - skipping run as a precaution")
-        return False
+    """Auto-detect approach: today counts as a fresh NSE trading day if
+    ANY of a few highly-liquid large-cap stocks has a daily bar dated
+    today (IST). If none do, today is NOT a fresh trading day and the
+    caller should skip the whole job.
+
+    ORIGINALLY this checked only the raw ^NSEI index quote. That turned
+    out to be a real bug, not just a theoretical risk: on a live run, the
+    index symbol's data lagged a full calendar day behind actual equity
+    data on Yahoo Finance - individual stocks (including the ones this
+    scanner trades) had a fresh bar for a real trading day, while ^NSEI
+    still showed the PRIOR day's bar. Because this check runs BEFORE
+    anything else, that false negative caused the scanner to skip an
+    entire real trading day - not just delay it, but silently lose any
+    setups that confirmed that day, since the scanner only ever checks
+    "did today's candle just confirm a setup", with no historical catch-up.
+    That's a materially worse failure mode than a late/lagging individual
+    ticker (which just retries next run with nothing lost), so this check
+    now uses actual liquid equities - the same kind of data already proven
+    reliable by every other successful run - instead of a pure index quote,
+    and requires only ONE of several references to agree, so one symbol's
+    data hiccup on any given day can't single-handedly cause a lost day."""
+    for ticker in REFERENCE_TICKERS:
+        try:
+            df = yf.download(ticker, period="5d", interval="1d",
+                              progress=False, auto_adjust=True)
+            if df is None or df.empty:
+                print(f"[market_utils] {ticker}: no data returned, trying next reference")
+                continue
+            last_bar_date = pd.Timestamp(df.index[-1]).strftime(DATE_FMT)
+            today = today_ist_date_str()
+            if last_bar_date == today:
+                return True
+            print(f"[market_utils] {ticker}: last available bar is {last_bar_date}, "
+                  f"today (IST) is {today} - trying next reference before concluding "
+                  "today isn't a fresh trading day")
+        except Exception as e:
+            print(f"[market_utils] {ticker}: freshness check failed ({e}), trying next reference")
+            continue
+
+    print(f"[market_utils] None of {REFERENCE_TICKERS} show a bar dated today "
+          f"({today_ist_date_str()}) - treating today as NOT a fresh trading day. Skipping.")
+    return False
 
 
 def load_trade_book() -> pd.DataFrame:

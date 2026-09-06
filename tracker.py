@@ -196,6 +196,24 @@ def main():
     for idx in open_rows.index:
         ticker = df.at[idx, "Ticker"]
         try:
+            # IDEMPOTENCY GUARD (fixing a real bug found in production):
+            # if this row was already updated earlier TODAY - by the 4:15
+            # PM run, a manual workflow_dispatch, or a catchup_run.py
+            # execution - skip it entirely. Without this, every extra
+            # same-day execution re-incremented Days Held against the SAME
+            # closed candle, since nothing here previously checked whether
+            # today's update had already happened. Evidence: rows entered
+            # 2026-09-01 and last tracked 2026-09-04 (3 real trading days)
+            # showed Days Held=9 - a 3x inflation, consistent with the
+            # 4:15/8:15 PM schedule plus manual runs all incrementing the
+            # same day multiple times. Left unfixed, Time Exit (Days Held
+            # >= 20) would fire after ~7 real trading days instead of 20.
+            last_tracked_date = df.at[idx, "Last Tracked"][:10]  # "YYYY-MM-DD" prefix
+            if last_tracked_date == today_str:
+                print(f"[tracker] {ticker}: already updated today ({today_str}) - "
+                      "skipping to avoid double-counting Days Held")
+                continue
+
             bar = bars.get(ticker)
             if bar is None:
                 print(f"[tracker] {ticker}: NO DATA returned at all this run - "
